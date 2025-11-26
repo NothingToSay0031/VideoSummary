@@ -25,8 +25,7 @@ except ImportError:
     genai = None
 
 # ==== LLM 配置（可根据需要修改）====
-# os.environ.get("GEMINI_API_KEY", "")
-GEMINI_API_KEY = ""
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 PRIMARY_MODEL = "gemini-2.5-pro"
 BASE_SYSTEM_PROMPT = """
 ## Background Information
@@ -778,8 +777,8 @@ class VideoSummaryApp:
 
         # 检测语言并切分文本（按词/字数量）
         language = detect_language(consolidated_text)
-        CHUNK_SIZE = 2000 if language == "Chinese" else 1700
-        OVERLAP = 150 if language == "Chinese" else 120
+        CHUNK_SIZE = 1000 if language == "Chinese" else 850
+        OVERLAP = 60 if language == "Chinese" else 50
 
         chunks = self._split_subtitles_into_chunks(
             subtitle_data, CHUNK_SIZE, OVERLAP)

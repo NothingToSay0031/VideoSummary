@@ -136,7 +136,7 @@ python video_summary_app.py "https://www.bilibili.com/video/BVxxxx" -c cookies.t
    `VideoDownloader` 通过 `yt-dlp` 先拉取视频信息、字幕列表，优先命中 `ai-zh > zh-CN > zh > ai-en > en`，若本地已有文件会自动复用。
 
 2. **解析与分段**  
-   解析字幕，`parse_subtitles` 会输出带时间戳的结构体与纯文本稿。`detect_language` 决定切片大小（中文 2k token / 英文 1.7k token）长度目前约为10min视频量，可按需调整。
+   解析字幕，`parse_subtitles` 会输出带时间戳的结构体与纯文本稿。`detect_language` 决定切片大小（中文 2k token / 英文 1.7k token 长度约为10min视频量），可按需调整。
 
 3. **生成总结 & 抓帧（并行）**  
    - `ThreadPoolExecutor` 开两个任务：  
