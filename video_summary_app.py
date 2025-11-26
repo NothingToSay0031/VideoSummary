@@ -14,7 +14,7 @@ import logging
 from datetime import datetime
 from bisect import bisect_left
 from urllib.parse import quote
-from typing import List, Dict, Any, Tuple, TextIO
+from typing import List, Dict, Any, Tuple, TextIO, Optional
 from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
@@ -57,6 +57,7 @@ def chinese_char_ratio(text: str) -> float:
         return 0.0
     chinese_count = len(re.findall(r'[\u4e00-\u9fff]', text))
     return chinese_count / total_chars
+
 
 # ==== LLM 配置（可根据需要修改）====
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -785,16 +786,22 @@ class VideoSummaryApp:
         self.test_mode = test_mode
         self.text_only = text_only
 
-    def process_video(self, url: str,
+    def process_video(self, url: Optional[str] = None,
                       frame_extraction_interval: float = 2.0,
-                      skip_similar_frames: bool = True) -> str:
+                      skip_similar_frames: bool = True,
+                      local_video: Optional[str] = None,
+                      local_subtitle: Optional[str] = None,
+                      provided_title: Optional[str] = None) -> str:
         """
-        处理视频：下载、解析、总结、提取帧、生成markdown
+        处理视频：下载/加载、解析、总结、提取帧、生成markdown
 
         Args:
             url: 视频链接
             frame_extraction_interval: 帧提取间隔（秒）
             skip_similar_frames: 是否跳过相似帧
+            local_video: 本地视频文件路径
+            local_subtitle: 本地字幕文件路径（SRT/VTT）
+            provided_title: 手动指定输出标题
 
         Returns:
             生成的markdown文件路径
@@ -803,17 +810,72 @@ class VideoSummaryApp:
         logger.info("开始处理视频")
         logger.info("=" * 60)
 
-        # 1. 下载视频和字幕
-        logger.info("\n[步骤 1/5] 下载视频和字幕...")
-        download_result = self.downloader.download(
-            url, download_video=not self.text_only)
-        video_path = download_result['video']
-        subtitle_path = download_result['subtitle']
-        video_title = download_result['title']
+        logger.info("\n[步骤 1/5] 准备视频和字幕...")
+
+        download_result: Optional[Dict[str, str]] = None
+        video_path: Optional[str] = None
+        subtitle_path: Optional[str] = None
+
+        video_title = sanitize_filename(
+            provided_title) if provided_title else None
+
+        if local_video:
+            if not os.path.isfile(local_video):
+                raise FileNotFoundError(f"本地视频文件不存在: {local_video}")
+            video_path = local_video
+            logger.info(f"🗂️ 使用本地视频: {video_path}")
+            if not video_title:
+                base = os.path.splitext(os.path.basename(local_video))[0]
+                video_title = sanitize_filename(base)
+
+        if local_subtitle:
+            if not os.path.isfile(local_subtitle):
+                raise FileNotFoundError(f"本地字幕文件不存在: {local_subtitle}")
+            subtitle_path = local_subtitle
+            logger.info(f"🗂️ 使用本地字幕: {subtitle_path}")
+            if not video_title:
+                base = os.path.splitext(os.path.basename(local_subtitle))[0]
+                video_title = sanitize_filename(base)
 
         if not subtitle_path:
-            logger.error("未找到字幕文件，无法继续处理")
-            raise ValueError("需要字幕文件才能生成总结")
+            if not url:
+                raise ValueError("未提供视频链接或字幕文件，无法继续")
+            download_result = self.downloader.download(
+                url, download_video=not self.text_only)
+            video_path = video_path or download_result.get('video')
+            subtitle_path = download_result.get('subtitle')
+            if not video_title:
+                video_title = download_result.get('title', 'video')
+        else:
+            if url:
+                logger.info("⚠️ 已指定本地字幕，将跳过字幕下载")
+
+        if not subtitle_path:
+            raise ValueError("未找到字幕文件，无法继续处理")
+
+        if not self.text_only:
+            if not video_path:
+                if not url:
+                    raise ValueError("非 text-only 模式需要提供视频文件或链接")
+                if not download_result:
+                    download_result = self.downloader.download(
+                        url, download_video=True)
+                video_path = download_result.get('video')
+            if not video_path or not os.path.isfile(video_path):
+                raise FileNotFoundError("未找到可用的视频文件，无法提取截图")
+        else:
+            if not video_path and download_result:
+                video_path = download_result.get('video')
+
+        if not video_title:
+            if video_path:
+                video_title = sanitize_filename(
+                    os.path.splitext(os.path.basename(video_path))[0])
+            elif subtitle_path:
+                video_title = sanitize_filename(
+                    os.path.splitext(os.path.basename(subtitle_path))[0])
+            else:
+                video_title = "video"
 
         # 2. 解析字幕
         logger.info("\n[步骤 2/5] 解析字幕...")
@@ -1319,7 +1381,8 @@ def main():
         """
     )
 
-    parser.add_argument('url', help='视频链接（YouTube/Bilibili等）')
+    parser.add_argument('url', nargs='?', default=None,
+                        help='视频链接（YouTube/Bilibili等），可选（本地模式可省略）')
     parser.add_argument('-o', '--output', default='output',
                         help='输出目录，默认: output')
     parser.add_argument('-i', '--interval', type=float, default=2.0,
@@ -1330,6 +1393,15 @@ def main():
     parser.add_argument(
         '-n', '--text-only', action='store_true',
         help='Non video模式：不下载视频、不提取截图，仅输出文本总结')
+    parser.add_argument(
+        '--local-video', type=str, default=None,
+        help='本地视频文件路径（配合本地字幕或仅提取帧）')
+    parser.add_argument(
+        '--local-subtitle', type=str, default=None,
+        help='本地字幕文件路径（SRT/VTT）；text-only 模式下只需该参数')
+    parser.add_argument(
+        '--title', type=str, default=None,
+        help='手动指定输出标题（可选）')
     parser.add_argument(
         '-c', '--cookies', type=str, default=None,
         help='Cookies 文件路径（用于 Bilibili 等需要登录的网站），例如: --cookies cookies.txt')
@@ -1345,12 +1417,21 @@ def main():
         elif cookies_file:
             logger.info(f"✅ 使用 Cookies 文件: {cookies_file}")
 
+        if not args.url and not args.local_subtitle:
+            parser.error("必须提供视频链接或本地字幕文件")
+        if not args.text_only and not (args.url or args.local_video):
+            parser.error("非 text-only 模式需要视频链接或本地视频文件")
+
         app = VideoSummaryApp(output_dir=args.output,
                               test_mode=args.test,
                               text_only=args.text_only,
                               cookies_file=cookies_file)
         result_path = app.process_video(
-            args.url, frame_extraction_interval=args.interval)
+            args.url,
+            frame_extraction_interval=args.interval,
+            local_video=args.local_video,
+            local_subtitle=args.local_subtitle,
+            provided_title=args.title)
         print(f"\n✅ 完成！结果文件: {result_path}")
     except Exception as e:
         logger.error(f"处理失败: {e}")
