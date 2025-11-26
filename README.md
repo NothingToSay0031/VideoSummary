@@ -28,9 +28,6 @@
 ```
 VideoSummary/
 ├── video_summary_app.py   # 主入口 + 任务编排
-├── extract_frames.py      # 帧提取工具
-├── srt.py                 # 字幕解析工具
-├── Summary.py             # 旧版总结逻辑（可参考）
 ├── requirements.txt       # 依赖
 └── output/                # 运行后生成的结果目录
 ```
