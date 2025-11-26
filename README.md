@@ -6,42 +6,11 @@
 
 ---
 
-## 功能亮点
-
-1. **智能下载**  
-   使用 `yt-dlp` 自动选择最优画质、优先抓取中文字幕（回退英文），同时支持复用本地已下载资源以节省时间。
-
-2. **字幕与文本处理**  
-   兼容 SRT/VTT，自动清理 BOM、序号，生成结构化字幕和纯文本稿。
-
-3. **LLM 总结**  
-   基于 Google Gemini（默认 `gemini-2.5-pro`），按语言自适应切块，输出分部分的结构化总结；支持 `--test` 模式快速定位提示词。
-
-4. **关键帧提取**  
-   将每段总结映射回视频时间戳，按自定义间隔批量抓帧，跳过相似帧以减少冗余。
-
-5. **Markdown 输出**  
-   自动生成 `视频标题_最终总结.md`，图文并茂，使用相对路径方便分享/同步。
-
----
-
-## 目录结构
-
-```
-VideoSummary/
-├── video_summary_app.py   # 主入口 + 任务编排
-├── requirements.txt       # 依赖
-└── output/                # 运行后生成的结果目录
-```
-
----
-
 ## 环境要求
 
-- Python 3.9+
-- FFmpeg（yt-dlp 会自动调用，系统需可执行）
+- Python
 - `pip install -r requirements.txt`
-- 可用的 Google Gemini API Key（Pro 级模型可免费试用，注意配额）
+- 可用的 Google Gemini API Key
 
 ---
 
@@ -87,17 +56,26 @@ Prompt写在 `video_summary_app.py` 里，变量名为 `BASE_SYSTEM_PROMPT`。�
 
 ```bash
 python video_summary_app.py "<视频链接>" [选项]
+python video_summary_app.py --local-video "<本地视频文件路径>" --local-subtitle "<本地字幕文件路径>" --title "<输出标题>"
 ```
 
 ### 常用参数
 
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
-| `url` | 必填，支持 YouTube / Bilibili / 任何 yt-dlp 支持的平台 | - |
+| `url` | 支持 YouTube / Bilibili / 任意 yt-dlp 平台；走本地流程时可留空 | `None` |
 | `-o / --output` | 输出根目录，内部会自动创建 `downloads/`、`_frames/` 等 | `output` |
 | `-i / --interval` | 帧提取间隔（秒），越小截图越密集 | `2.0` |
-| `-c / --cookies` | Cookies 文件路径，为登录受限视频提供权限 | `None` |
-| `-t / --test` | 测试模式：不调用 LLM，只输出 Prompt，便于调参数 | `False` |
+| `-c / --cookies` | Cookies 文件路径，为登录受限视频提供权限；程序会先校验文件存在 | `None` |
+| `-t / --test` | 测试模式：不调用 LLM，只输出 Prompt，便于调试上下文 | `False` |
+| `-n / --text-only` | 仅生成文字总结：跳过视频下载与帧提取 | `False` |
+| `--local-video` | 本地视频文件路径：配合 `--local-subtitle` | `None` |
+| `--local-subtitle` | 本地字幕（SRT）；text-only 模式只需字幕即可运行 | `None` |
+| `--title` | 手动指定输出 Markdown 标题，覆盖自动推断 | `None` |
+
+> 使用约束：  
+> - 必须至少提供「视频链接」或「本地字幕」其一。  
+> - 在非 `--text-only` 模式下，还需要提供「视频链接」或「本地视频」用于提帧。
 
 示例：
 
@@ -111,23 +89,6 @@ python video_summary_app.py "https://www.bilibili.com/video/BVxxxx" -o bili_outp
 # 传入 Cookies 并启用测试模式
 python video_summary_app.py "https://www.bilibili.com/video/BVxxxx" -c cookies.txt -t
 ```
-
----
-
-## Cookies 说明
-
-1. **为什么需要 Cookies？**  
-   - 访问会员/付费/已登录用户才能看的视频。  
-   - 读取 Bilibili AI 字幕（例如 `ai-zh`）通常需要登录。
-
-2. **如何导出？**  
-   - 推荐安装浏览器插件（如 Get cookies.txt）。  
-   - 登录目标网站后，通过插件导出 Netscape 格式文件。
-
-3. **如何使用？**  
-   - 运行时追加 `-c 路径`。程序会在构建 `yt-dlp` 命令时自动注入 `--cookies <file>`。  
-   - 若文件不存在会有警告并回退为无 Cookie 模式。
-
 ---
 
 ## 处理流程
@@ -172,14 +133,14 @@ output/
 - **模型 / API 版本**：调整 `PRIMARY_MODEL` 或创建不同的 `genai.Client` 配置。  
 - **文本切片**：`CHUNK_SIZE`、`OVERLAP` 定义在 `process_video` 内，可针对不同语言/视频类型调整。  
 - **帧提取策略**：`TimeRangeExtractor.extract_frames_in_range` 支持 `skip_similar`、图片格式、质量等参数；如需更细粒度可改写函数。  
-- **测试模式**：`-t / --test` 会直接把 Prompt 写进总结文件，用于检查上下文是否正确，特别适合调试提示词或 chunk 大小。
+- **测试模式**：`-t / --test` 会直接把 Prompt 写进总结文件，用于检查上下文是否正确，适合调试提示词或 chunk 大小。
 
 ---
 
 ## 常见问题
 
 1. **没有字幕怎么办？**  
-   目前必须依赖字幕；可先用 Youtube/Bilibili AI 字幕或第三方工具生成字幕后放到 `downloads/` 并重命名匹配标题。
+   目前必须依赖字幕；可先用 Youtube/Bilibili AI 字幕或第三方工具（如通义听悟，Whisper等）生成字幕后放到 `downloads/` 并重命名匹配标题。
 
 2. **截图和内容不匹配？**  
    文本到时间段的映射基于字幕时间戳，若字幕与画面不同步可适当增大 `interval`、修改 `TextToTimeMapper` 或手动挑选关键帧。
@@ -188,9 +149,8 @@ output/
    检查 `GEMINI_API_KEY` 是否正确，或在 `.env` / 环境变量里配置多个 Key。必要时可以切换为较低延迟模型。
 
 4. **大视频耗时太久？**  
-   - 先用 `yt-dlp` 下载到本地，程序会复用。  
+   - 使用其他下载器把视频下载到本地，然后使用 `--local-video` 参数指定本地视频文件路径。  
    - 降低帧提取频率（`-i`），或只保留部分 chunk。  
-   - 如果只是想看总结，可用 `-t` 跳过帧提取逻辑。
 
 ---
 

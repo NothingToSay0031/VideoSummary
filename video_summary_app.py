@@ -92,7 +92,7 @@ SubtitleData = List[SubtitleEntry]
 
 def parse_subtitles(file_content: str) -> Tuple[SubtitleData, str]:
     """
-    解析 SRT/VTT 字幕，返回结构化字幕列表与整合文本
+    解析 SRT 字幕，返回结构化字幕列表与整合文本
     """
     if file_content.startswith('\ufeff'):
         file_content = file_content.lstrip('\ufeff')
@@ -791,7 +791,7 @@ class VideoSummaryApp:
                       skip_similar_frames: bool = True,
                       local_video: Optional[str] = None,
                       local_subtitle: Optional[str] = None,
-                      provided_title: Optional[str] = None) -> str:
+                      provided_title: Optional[str] = None) -> Optional[str]:
         """
         处理视频：下载/加载、解析、总结、提取帧、生成markdown
 
@@ -800,11 +800,11 @@ class VideoSummaryApp:
             frame_extraction_interval: 帧提取间隔（秒）
             skip_similar_frames: 是否跳过相似帧
             local_video: 本地视频文件路径
-            local_subtitle: 本地字幕文件路径（SRT/VTT）
+            local_subtitle: 本地字幕文件路径（SRT）
             provided_title: 手动指定输出标题
 
         Returns:
-            生成的markdown文件路径
+            生成的markdown文件路径；若缺少字幕无法继续则返回 None
         """
         logger.info("=" * 60)
         logger.info("开始处理视频")
@@ -824,6 +824,8 @@ class VideoSummaryApp:
                 raise FileNotFoundError(f"本地视频文件不存在: {local_video}")
             video_path = local_video
             logger.info(f"🗂️ 使用本地视频: {video_path}")
+            if url:
+                logger.info("📥 将使用提供的 URL 下载字幕，搭配本地视频处理")
             if not video_title:
                 base = os.path.splitext(os.path.basename(local_video))[0]
                 video_title = sanitize_filename(base)
@@ -840,8 +842,11 @@ class VideoSummaryApp:
         if not subtitle_path:
             if not url:
                 raise ValueError("未提供视频链接或字幕文件，无法继续")
+            need_video_download = (
+                not self.text_only and video_path is None
+            )
             download_result = self.downloader.download(
-                url, download_video=not self.text_only)
+                url, download_video=need_video_download)
             video_path = video_path or download_result.get('video')
             subtitle_path = download_result.get('subtitle')
             if not video_title:
@@ -851,7 +856,8 @@ class VideoSummaryApp:
                 logger.info("⚠️ 已指定本地字幕，将跳过字幕下载")
 
         if not subtitle_path:
-            raise ValueError("未找到字幕文件，无法继续处理")
+            logger.warning("⚠️ 仅获取到视频文件，未找到字幕，终止本次处理")
+            return None
 
         if not self.text_only:
             if not video_path:
@@ -1398,7 +1404,7 @@ def main():
         help='本地视频文件路径（配合本地字幕或仅提取帧）')
     parser.add_argument(
         '--local-subtitle', type=str, default=None,
-        help='本地字幕文件路径（SRT/VTT）；text-only 模式下只需该参数')
+        help='本地字幕文件路径（SRT）；text-only 模式下只需该参数')
     parser.add_argument(
         '--title', type=str, default=None,
         help='手动指定输出标题（可选）')
@@ -1432,7 +1438,10 @@ def main():
             local_video=args.local_video,
             local_subtitle=args.local_subtitle,
             provided_title=args.title)
-        print(f"\n✅ 完成！结果文件: {result_path}")
+        if result_path:
+            print(f"\n✅ 完成！结果文件: {result_path}")
+        else:
+            logger.info("本次任务未生成输出文件。")
     except Exception as e:
         logger.error(f"处理失败: {e}")
         import traceback
