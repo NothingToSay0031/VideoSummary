@@ -14,7 +14,7 @@ import logging
 from datetime import datetime
 from bisect import bisect_left
 from urllib.parse import quote
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, TextIO
 from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
@@ -23,6 +23,40 @@ try:
     from google import genai
 except ImportError:
     genai = None
+
+INVALID_PATH_CHARS = set('<>:"/\\|?*')
+
+
+def sanitize_filename(name: str) -> str:
+    """
+    将不适合作为文件/文件夹名的字符替换为下划线
+    """
+    if not name:
+        return "untitled"
+
+    sanitized_chars = []
+    for ch in name:
+        if ch in INVALID_PATH_CHARS or ord(ch) < 32 or ch.isspace():
+            sanitized_chars.append('_')
+        else:
+            sanitized_chars.append(ch)
+
+    sanitized = ''.join(sanitized_chars)
+    sanitized = re.sub(r'_+', '_', sanitized).strip('_')
+    return sanitized or "untitled"
+
+
+def chinese_char_ratio(text: str) -> float:
+    """
+    统计文本中汉字所占比例（忽略空白字符）
+    """
+    if not text:
+        return 0.0
+    total_chars = len([ch for ch in text if not ch.isspace()])
+    if total_chars == 0:
+        return 0.0
+    chinese_count = len(re.findall(r'[\u4e00-\u9fff]', text))
+    return chinese_count / total_chars
 
 # ==== LLM 配置（可根据需要修改）====
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -217,19 +251,30 @@ class VideoDownloader:
             url
         ])
 
+        raw_video_title = None
         try:
             info_output = subprocess.run(
                 info_cmd, capture_output=True, text=True, check=True
             )
             video_info = json.loads(info_output.stdout)
-            video_title = video_info.get('title', 'video')
-            logger.info(f"📹 检测到视频标题: {video_title}")
+            raw_video_title = video_info.get('title', 'video')
+            logger.info(f"📹 检测到视频标题: {raw_video_title}")
             # 清理标题中的非法字符
-            video_title = re.sub(r'[<>:"/\\|?*]', '_', video_title)
+            video_title = sanitize_filename(raw_video_title)
             logger.info(f"📝 清理后的标题: {video_title}")
         except Exception as e:
             logger.warning(f"获取视频信息失败: {e}，使用默认标题")
+            raw_video_title = 'video'
             video_title = 'video'
+
+        chinese_ratio = chinese_char_ratio(raw_video_title)
+        prefer_chinese = chinese_ratio > 0.3
+        if prefer_chinese:
+            logger.info(
+                f"🌏 检测到视频标题中中文比例 {chinese_ratio:.0%}，优先选择中文字幕")
+        else:
+            logger.info(
+                f"🌐 中文比例 {chinese_ratio:.0%}，默认优先英文字幕")
 
         # 检查本地是否已有视频和字幕文件
         logger.info("检查本地是否已有视频和字幕文件...")
@@ -287,6 +332,7 @@ class VideoDownloader:
 
         # 检查可用字幕
         subtitle_lang = None
+        available_subs = ''
         try:
             sub_cmd = self._build_ytdlp_command([
                 '--list-subs',
@@ -298,30 +344,32 @@ class VideoDownloader:
             )
             available_subs = sub_output.stdout
 
-            # 查找英文或中文字幕（优先中文）
-            # 检查自动生成的字幕（通常用en,zh等简写）
-            # 检查手动字幕（通常用en-US,zh-CN等）
-            # 检查Bilibili AI字幕（ai-zh, ai-en等）
-            # yt-dlp --list-subs 输出格式：Language    Formats (如 "ai-zh    srt")
-            if re.search(r'\bai-zh\b', available_subs, re.IGNORECASE):
-                subtitle_lang = 'ai-zh'
-                logger.info("找到简体中文字幕 ai-zh（优先使用）")
-            elif re.search(r'\b(zh-cn|zh_CN|chinese)\b', available_subs, re.IGNORECASE):
-                subtitle_lang = 'zh-cn'
-                logger.info("找到简体中文字幕（优先使用）")
-            elif re.search(r'\b(zh-tw|zh_TW)\b', available_subs, re.IGNORECASE):
-                subtitle_lang = 'zh-tw'
-                logger.info("找到繁体中文字幕（优先使用）")
-            elif re.search(r'\bzh\b', available_subs, re.IGNORECASE):
-                subtitle_lang = 'zh'
-                logger.info("找到中文字幕（优先使用）")
-            elif re.search(r'\bai-en\b', available_subs, re.IGNORECASE):
-                subtitle_lang = 'ai-en'
-                logger.info("找到英文字幕 ai-en")
-            elif re.search(r'\b(en|english)\b', available_subs, re.IGNORECASE):
-                subtitle_lang = 'en'
-                logger.info("找到英文字幕")
-            else:
+            zh_first_preferences = [
+                (r'\bai-zh\b', 'ai-zh', "找到简体中文字幕 ai-zh"),
+                (r'\b(zh-cn|zh_CN|chinese)\b', 'zh-cn', "找到简体中文字幕"),
+                (r'\b(zh-tw|zh_TW)\b', 'zh-tw', "找到繁体中文字幕"),
+                (r'\bzh\b', 'zh', "找到中文字幕"),
+                (r'\bai-en\b', 'ai-en', "找到英文字幕 ai-en"),
+                (r'\b(en|english)\b', 'en', "找到英文字幕")
+            ]
+            en_first_preferences = [
+                (r'\bai-en\b', 'ai-en', "找到英文字幕 ai-en"),
+                (r'\b(en|english)\b', 'en', "找到英文字幕"),
+                (r'\bai-zh\b', 'ai-zh', "找到简体中文字幕 ai-zh"),
+                (r'\b(zh-cn|zh_CN|chinese)\b', 'zh-cn', "找到简体中文字幕"),
+                (r'\b(zh-tw|zh_TW)\b', 'zh-tw', "找到繁体中文字幕"),
+                (r'\bzh\b', 'zh', "找到中文字幕")
+            ]
+
+            lang_preferences = zh_first_preferences if prefer_chinese else en_first_preferences
+
+            for pattern, code, message in lang_preferences:
+                if re.search(pattern, available_subs, re.IGNORECASE):
+                    subtitle_lang = code
+                    logger.info(message)
+                    break
+
+            if not subtitle_lang:
                 logger.warning("未找到中文或英文字幕，将尝试下载所有可用字幕")
                 subtitle_lang = 'all'  # 下载所有字幕，后续选择
         except Exception as e:
@@ -751,6 +799,7 @@ class VideoSummaryApp:
         video_path = download_result['video']
         subtitle_path = download_result['subtitle']
         video_title = download_result['title']
+        safe_video_title = sanitize_filename(video_title)
 
         if not subtitle_path:
             logger.error("未找到字幕文件，无法继续处理")
@@ -766,7 +815,7 @@ class VideoSummaryApp:
 
         # 保存文稿到临时文件
         temp_text_file = os.path.join(
-            self.output_dir, f"{video_title}_transcript.txt")
+            self.output_dir, f"{safe_video_title}_transcript.txt")
         with open(temp_text_file, 'w', encoding='utf-8') as f:
             f.write(consolidated_text)
         logger.info(f"文稿已保存: {temp_text_file}")
@@ -789,13 +838,14 @@ class VideoSummaryApp:
             word_count = self._count_words(chunk['text'])
             logger.info(f"  - 片段 {idx}/{len(chunks)} 词数: {word_count}")
 
-        frames_dir = os.path.join(self.output_dir, f"{video_title}_frames")
+        frames_dir = os.path.join(
+            self.output_dir, f"{safe_video_title}_frames")
         os.makedirs(frames_dir, exist_ok=True)
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             summary_future = executor.submit(
                 self._generate_summary_with_chunks,
-                temp_text_file, chunk_texts, video_title
+                temp_text_file, chunk_texts, video_title, safe_video_title
             )
             frames_future = executor.submit(
                 self._extract_frames_for_chunks,
@@ -808,7 +858,7 @@ class VideoSummaryApp:
         # 5. 生成最终markdown
         logger.info("\n[步骤 5/5] 生成最终markdown文档...")
         final_md_path = self._generate_final_markdown(
-            summary_path, chunk_texts, chunk_frames, video_title, video_path
+            summary_path, chunk_texts, chunk_frames, video_title, safe_video_title, video_path
         )
 
         logger.info("=" * 60)
@@ -881,7 +931,8 @@ class VideoSummaryApp:
         return chunks
 
     def _generate_summary_with_chunks(self, text_file: str, chunks: List[str],
-                                      video_title: str) -> str:
+                                      video_title: str,
+                                      safe_video_title: str) -> str:
         """
         生成总结并返回总结文件路径
         这里需要调用Summary.py的功能，但需要获取每个chunk的总结
@@ -932,7 +983,7 @@ class VideoSummaryApp:
 
         # 保存总结到文件
         summary_path = os.path.join(
-            self.output_dir, f"{video_title}_summary_temp.md")
+            self.output_dir, f"{safe_video_title}_summary_temp.md")
         with open(summary_path, 'w', encoding='utf-8') as f:
             f.write(f"# {video_title} 学习笔记\n\n")
             f.write(f"> 由 AI 生成，共 {len(chunks)} 部分\n\n")
@@ -958,8 +1009,9 @@ class VideoSummaryApp:
             start_time = chunk['start_time']
             end_time = chunk['end_time']
             time_str = f"{int(start_time//60):02d}m{int(start_time % 60):02d}s-{int(end_time//60):02d}m{int(end_time % 60):02d}s"
-            chunk_frames_dir = os.path.join(
-                frames_dir, f"chunk_{i+1:02d}_{time_str}")
+            chunk_dir_name = sanitize_filename(
+                f"chunk_{i+1:02d}_{time_str}")
+            chunk_frames_dir = os.path.join(frames_dir, chunk_dir_name)
 
             # 测试模式下如果目录已存在则直接复用，避免重新提取
             if self.test_mode and os.path.isdir(chunk_frames_dir):
@@ -988,7 +1040,8 @@ class VideoSummaryApp:
 
     def _generate_final_markdown(self, summary_path: str, chunks: List[str],
                                  chunk_frames: Dict[int, List[str]],
-                                 video_title: str, video_path: str) -> str:
+                                 video_title: str, safe_video_title: str,
+                                 video_path: str) -> str:
         """
         生成最终的markdown文档，包含总结和截图
         """
@@ -996,7 +1049,8 @@ class VideoSummaryApp:
         with open(summary_path, 'r', encoding='utf-8') as f:
             summary_content = f.read()
 
-        final_md_path = os.path.join(self.output_dir, f"{video_title}_最终总结.md")
+        final_md_path = os.path.join(
+            self.output_dir, f"{safe_video_title}_最终总结.md")
 
         with open(final_md_path, 'w', encoding='utf-8') as f:
             # 写入文件头
@@ -1038,32 +1092,115 @@ class VideoSummaryApp:
                     # 写入部分标题
                     f.write(f"\n## 第 {part_num} 部分\n\n")
 
-                    # 先展示截图
-                    if chunk_idx in chunk_frames and chunk_frames[chunk_idx]:
-                        f.write("### 📸 相关截图\n\n")
-                        for frame_path in chunk_frames[chunk_idx]:
-                            if os.path.exists(frame_path):
-                                try:
-                                    rel_path = os.path.relpath(
-                                        frame_path, os.path.dirname(final_md_path))
-                                    rel_path = self._format_md_path(rel_path)
-                                    f.write(f"![截图]({rel_path})\n\n")
-                                except ValueError:
-                                    fallback_path = self._format_md_path(
-                                        frame_path)
-                                    f.write(
-                                        f"![截图]({fallback_path})\n\n")
+                    frames_for_chunk = chunk_frames.get(chunk_idx, [])
 
                     # 再写总结内容（去除末尾的---分隔符）
                     part_content_clean = part_content.rstrip(
                         '\n').rstrip('---').rstrip('\n').strip()
-                    f.write(part_content_clean)
+
+                    sections = [
+                        s.strip() for s in re.split(
+                            r'\n\s*---+\s*\n', part_content_clean)
+                        if s.strip()
+                    ]
+
+                    inserted_by_section = False
+                    if frames_for_chunk and len(sections) > 1:
+                        allocations = self._allocate_frame_counts(
+                            sections, len(frames_for_chunk))
+                        frame_cursor = 0
+                        for section_idx, section_text in enumerate(sections):
+                            num_frames = allocations[section_idx] if section_idx < len(
+                                allocations) else 0
+                            if num_frames > 0:
+                                section_frames = frames_for_chunk[
+                                    frame_cursor:frame_cursor + num_frames]
+                                self._write_frame_block(
+                                    f, section_frames, final_md_path)
+                                frame_cursor += num_frames
+                            f.write(section_text)
+                            f.write("\n\n")
+                            if section_idx < len(sections) - 1:
+                                f.write("---\n\n")
+                        inserted_by_section = True
+
+                    if not inserted_by_section:
+                        if frames_for_chunk:
+                            self._write_frame_block(
+                                f, frames_for_chunk, final_md_path)
+                        f.write(part_content_clean)
+
                     f.write("\n\n---\n\n")
             else:
                 # 如果无法分割，直接写入整个内容
                 f.write(summary_content)
 
         return final_md_path
+
+    def _write_frame_block(self, file_obj: TextIO, frame_paths: List[str],
+                           final_md_path: str) -> None:
+        """
+        将一组帧以 Markdown 图片形式写入
+        """
+        if not frame_paths:
+            return
+
+        # file_obj.write("### 📸 相关截图\n\n")
+        base_dir = os.path.dirname(final_md_path)
+        for frame_path in frame_paths:
+            if not os.path.exists(frame_path):
+                continue
+            try:
+                rel_path = os.path.relpath(frame_path, base_dir)
+                rel_path = self._format_md_path(rel_path)
+                file_obj.write(f"![截图]({rel_path})\n\n")
+            except ValueError:
+                fallback_path = self._format_md_path(frame_path)
+                file_obj.write(f"![截图]({fallback_path})\n\n")
+
+    def _allocate_frame_counts(self, sections: List[str],
+                               total_frames: int) -> List[int]:
+        """
+        根据每个段落的字数按比例分配截图数量
+        """
+        if total_frames <= 0:
+            return [0] * len(sections)
+
+        weights: List[int] = []
+        for section in sections:
+            weight = self._count_words(section)
+            weights.append(weight if weight > 0 else 1)
+
+        total_weight = sum(weights)
+        if total_weight == 0:
+            total_weight = len(sections)
+            weights = [1] * len(sections)
+
+        allocations: List[int] = []
+        remainders: List[float] = []
+        assigned = 0
+        for weight in weights:
+            exact = (total_frames * weight) / total_weight
+            alloc = int(exact)
+            allocations.append(alloc)
+            remainders.append(exact - alloc)
+            assigned += alloc
+
+        remaining = total_frames - assigned
+        if remaining > 0:
+            order = sorted(
+                range(len(sections)),
+                key=lambda idx: remainders[idx],
+                reverse=True
+            )
+            idx = 0
+            while remaining > 0 and order:
+                target = order[idx % len(order)]
+                allocations[target] += 1
+                remaining -= 1
+                idx += 1
+
+        return allocations
 
     @staticmethod
     def _count_words(text: str) -> int:
