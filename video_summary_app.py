@@ -799,7 +799,6 @@ class VideoSummaryApp:
         video_path = download_result['video']
         subtitle_path = download_result['subtitle']
         video_title = download_result['title']
-        safe_video_title = sanitize_filename(video_title)
 
         if not subtitle_path:
             logger.error("未找到字幕文件，无法继续处理")
@@ -815,7 +814,7 @@ class VideoSummaryApp:
 
         # 保存文稿到临时文件
         temp_text_file = os.path.join(
-            self.output_dir, f"{safe_video_title}_transcript.txt")
+            self.output_dir, f"{video_title}_transcript.txt")
         with open(temp_text_file, 'w', encoding='utf-8') as f:
             f.write(consolidated_text)
         logger.info(f"文稿已保存: {temp_text_file}")
@@ -839,13 +838,13 @@ class VideoSummaryApp:
             logger.info(f"  - 片段 {idx}/{len(chunks)} 词数: {word_count}")
 
         frames_dir = os.path.join(
-            self.output_dir, f"{safe_video_title}_frames")
+            self.output_dir, f"{video_title}_frames")
         os.makedirs(frames_dir, exist_ok=True)
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             summary_future = executor.submit(
                 self._generate_summary_with_chunks,
-                temp_text_file, chunk_texts, video_title, safe_video_title
+                temp_text_file, chunk_texts, video_title
             )
             frames_future = executor.submit(
                 self._extract_frames_for_chunks,
@@ -858,8 +857,11 @@ class VideoSummaryApp:
         # 5. 生成最终markdown
         logger.info("\n[步骤 5/5] 生成最终markdown文档...")
         final_md_path = self._generate_final_markdown(
-            summary_path, chunk_texts, chunk_frames, video_title, safe_video_title, video_path
+            summary_path, chunk_texts, chunk_frames, video_title, video_path
         )
+
+        # 清理中间产物
+        self._cleanup_temp_files([temp_text_file, summary_path])
 
         logger.info("=" * 60)
         logger.info("✅ 处理完成！")
@@ -867,6 +869,21 @@ class VideoSummaryApp:
         logger.info("=" * 60)
 
         return final_md_path
+
+    @staticmethod
+    def _cleanup_temp_files(paths: List[str]) -> None:
+        """
+        删除生成过程中的临时文件，忽略不存在的路径
+        """
+        for path in paths:
+            if not path:
+                continue
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    logger.info(f"🧹 已清理临时文件: {path}")
+            except Exception as exc:
+                logger.warning(f"无法删除临时文件 {path}: {exc}")
 
     def _split_subtitles_into_chunks(self, subtitle_data: SubtitleData,
                                      chunk_size: int, overlap: int) -> List[Dict[str, Any]]:
@@ -931,8 +948,7 @@ class VideoSummaryApp:
         return chunks
 
     def _generate_summary_with_chunks(self, text_file: str, chunks: List[str],
-                                      video_title: str,
-                                      safe_video_title: str) -> str:
+                                      video_title: str) -> str:
         """
         生成总结并返回总结文件路径
         这里需要调用Summary.py的功能，但需要获取每个chunk的总结
@@ -983,7 +999,7 @@ class VideoSummaryApp:
 
         # 保存总结到文件
         summary_path = os.path.join(
-            self.output_dir, f"{safe_video_title}_summary_temp.md")
+            self.output_dir, f"{video_title}_summary_temp.md")
         with open(summary_path, 'w', encoding='utf-8') as f:
             f.write(f"# {video_title} 学习笔记\n\n")
             f.write(f"> 由 AI 生成，共 {len(chunks)} 部分\n\n")
@@ -1022,8 +1038,10 @@ class VideoSummaryApp:
                     for f in sorted(os.listdir(chunk_frames_dir))
                     if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))
                 ]
-                chunk_frames[i] = existing_files
-                logger.info(f"    复用 {len(existing_files)} 帧")
+                deduped = self._deduplicate_frame_paths(existing_files)
+                chunk_frames[i] = deduped
+                logger.info(
+                    f"    复用 {len(deduped)} 帧（去重前 {len(existing_files)}）")
                 continue
 
             logger.info(f"  片段 {i+1}/{len(chunks)}: {time_str} -> 提取帧...")
@@ -1033,15 +1051,19 @@ class VideoSummaryApp:
                 interval=frame_extraction_interval,
                 skip_similar=skip_similar_frames
             )
-            chunk_frames[i] = frame_files
-            logger.info(f"    提取了 {len(frame_files)} 帧")
+            deduped_files = self._deduplicate_frame_paths(frame_files)
+            chunk_frames[i] = deduped_files
+            if len(deduped_files) != len(frame_files):
+                logger.info(
+                    f"    提取 {len(frame_files)} 帧，去重后保留 {len(deduped_files)}")
+            else:
+                logger.info(f"    提取了 {len(frame_files)} 帧")
 
         return chunk_frames
 
     def _generate_final_markdown(self, summary_path: str, chunks: List[str],
                                  chunk_frames: Dict[int, List[str]],
-                                 video_title: str, safe_video_title: str,
-                                 video_path: str) -> str:
+                                 video_title: str, video_path: str) -> str:
         """
         生成最终的markdown文档，包含总结和截图
         """
@@ -1050,7 +1072,7 @@ class VideoSummaryApp:
             summary_content = f.read()
 
         final_md_path = os.path.join(
-            self.output_dir, f"{safe_video_title}_最终总结.md")
+            self.output_dir, f"{video_title}_最终总结.md")
 
         with open(final_md_path, 'w', encoding='utf-8') as f:
             # 写入文件头
@@ -1157,6 +1179,41 @@ class VideoSummaryApp:
             except ValueError:
                 fallback_path = self._format_md_path(frame_path)
                 file_obj.write(f"![截图]({fallback_path})\n\n")
+
+    def _deduplicate_frame_paths(self, frame_paths: List[str],
+                                 similarity_threshold: float = 0.97) -> List[str]:
+        """
+        对图片路径按内容相似度去重
+        """
+        if not frame_paths:
+            return frame_paths
+
+        deduped: List[str] = []
+        reference_images: List[np.ndarray] = []
+        for path in frame_paths:
+            if not os.path.exists(path):
+                continue
+            image = cv2.imread(path)
+            if image is None:
+                continue
+            is_duplicate = False
+            for ref_img in reference_images:
+                similarity = TimeRangeExtractor._calculate_similarity(
+                    ref_img, image)
+                if similarity >= similarity_threshold:
+                    is_duplicate = True
+                    break
+
+            if is_duplicate:
+                continue
+
+            deduped.append(path)
+            reference_images.append(image)
+
+        if len(deduped) != len(frame_paths):
+            logger.info(
+                f"    去重后保留 {len(deduped)}/{len(frame_paths)} 帧")
+        return deduped
 
     def _allocate_frame_counts(self, sections: List[str],
                                total_frames: int) -> List[int]:
