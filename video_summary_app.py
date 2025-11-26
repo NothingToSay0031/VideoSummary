@@ -214,12 +214,13 @@ class VideoDownloader:
         cmd.extend(base_args)
         return cmd
 
-    def download(self, url: str) -> Dict[str, str]:
+    def download(self, url: str, download_video: bool = True) -> Dict[str, str]:
         """
         下载视频和字幕
 
         Args:
             url: 视频链接（YouTube/Bilibili等）
+            download_video: 是否下载视频文件
 
         Returns:
             包含视频路径和字幕路径的字典
@@ -276,53 +277,56 @@ class VideoDownloader:
             logger.info(
                 f"🌐 中文比例 {chinese_ratio:.0%}，默认优先英文字幕")
 
+        video_path = None
         # 检查本地是否已有视频和字幕文件
         logger.info("检查本地是否已有视频和字幕文件...")
         existing_video_path = None
         existing_subtitle_path = None
 
-        # 查找本地视频文件（匹配标题）
         video_extensions = ['.mp4', '.mkv', '.webm', '.flv', '.avi']
-        for ext in video_extensions:
-            potential_video = os.path.join(
-                self.output_dir, f"{video_title}{ext}")
-            if os.path.exists(potential_video) and os.path.getsize(potential_video) > 0:
-                existing_video_path = potential_video
-                logger.info(
-                    f"✅ 找到本地视频文件: {os.path.basename(existing_video_path)}")
-                break
+        if download_video:
+            # 查找本地视频文件（匹配标题）
+            for ext in video_extensions:
+                potential_video = os.path.join(
+                    self.output_dir, f"{video_title}{ext}")
+                if os.path.exists(potential_video) and os.path.getsize(potential_video) > 0:
+                    existing_video_path = potential_video
+                    logger.info(
+                        f"✅ 找到本地视频文件: {os.path.basename(existing_video_path)}")
+                    break
 
-        # 如果精确匹配没找到，尝试模糊匹配
-        if not existing_video_path:
-            title_clean = video_title.replace(' ', '_').replace('/', '_')
-            title_lower = video_title.lower()
-            title_clean_lower = title_clean.lower()
-            # 提取标题中的关键词（长度>2的单词）
-            title_words = [w for w in re.split(
-                r'[\s_\-]+', title_lower) if len(w) > 2]
+            # 如果精确匹配没找到，尝试模糊匹配
+            if not existing_video_path:
+                title_clean = video_title.replace(' ', '_').replace('/', '_')
+                title_lower = video_title.lower()
+                title_clean_lower = title_clean.lower()
+                # 提取标题中的关键词（长度>2的单词）
+                title_words = [w for w in re.split(
+                    r'[\s_\-]+', title_lower) if len(w) > 2]
 
-            for f in os.listdir(self.output_dir):
-                if f.endswith(tuple(video_extensions)) and not f.endswith(('.srt', '.vtt')):
-                    f_lower = f.lower()
-                    # 检查是否包含完整标题或清理后的标题
-                    if title_lower in f_lower or title_clean_lower in f_lower:
-                        potential_path = os.path.join(self.output_dir, f)
-                        if os.path.getsize(potential_path) > 0:
-                            existing_video_path = potential_path
-                            logger.info(
-                                f"✅ 找到本地视频文件（模糊匹配）: {os.path.basename(existing_video_path)}")
-                            break
-                    # 或者检查是否包含标题中的多个关键词（至少2个）
-                    elif len(title_words) >= 2:
-                        matched_words = sum(
-                            1 for word in title_words if word in f_lower)
-                        if matched_words >= 2:  # 至少匹配2个关键词
+                for f in os.listdir(self.output_dir):
+                    if f.endswith(tuple(video_extensions)) and not f.endswith(('.srt', '.vtt')):
+                        f_lower = f.lower()
+                        # 检查是否包含完整标题或清理后的标题
+                        if title_lower in f_lower or title_clean_lower in f_lower:
                             potential_path = os.path.join(self.output_dir, f)
                             if os.path.getsize(potential_path) > 0:
                                 existing_video_path = potential_path
                                 logger.info(
-                                    f"✅ 找到本地视频文件（关键词匹配，{matched_words}/{len(title_words)}）: {os.path.basename(existing_video_path)}")
+                                    f"✅ 找到本地视频文件（模糊匹配）: {os.path.basename(existing_video_path)}")
                                 break
+                        # 或者检查是否包含标题中的多个关键词（至少2个）
+                        elif len(title_words) >= 2:
+                            matched_words = sum(
+                                1 for word in title_words if word in f_lower)
+                            if matched_words >= 2:  # 至少匹配2个关键词
+                                potential_path = os.path.join(
+                                    self.output_dir, f)
+                                if os.path.getsize(potential_path) > 0:
+                                    existing_video_path = potential_path
+                                    logger.info(
+                                        f"✅ 找到本地视频文件（关键词匹配，{matched_words}/{len(title_words)}）: {os.path.basename(existing_video_path)}")
+                                    break
 
         # 查找本地字幕文件（容忍 B 站/YouTube 扩展命名，例如 *.NA.ai-zh.srt）
         existing_subtitle_path = self._find_local_subtitle_file(video_title)
@@ -377,117 +381,120 @@ class VideoDownloader:
             subtitle_lang = 'all'
 
         # 如果已有本地视频，跳过下载
-        if existing_video_path:
-            logger.info("⏭️  跳过视频下载，使用本地文件")
-            video_path = existing_video_path
-        else:
-            # 下载视频（最高画质，不下载音频，因为只用于截图）
-            logger.info("正在下载视频（最高画质，无音频，仅用于截图）...")
-            # 只下载视频流（最高画质），不下载音频
-            video_cmd = self._build_ytdlp_command([
-                # 优先mp4，其次720p+，最后任何最高画质视频
-                '-f', 'bestvideo[ext=mp4]/bestvideo[height>=720]/bestvideo',
-                '--no-write-subs',  # 不下载字幕（我们会单独下载）
-                '--no-playlist',  # 不下载播放列表
-                '-o', video_template,
-                url
-            ])
-
-            try:
-                result = subprocess.run(
-                    video_cmd, check=True, capture_output=True, text=True)
-                # 等待文件写入完成
-                import time
-                time.sleep(1)
-            except subprocess.CalledProcessError as e:
-                # 如果只下载视频失败，尝试下载视频+最低音频
-                logger.warning(
-                    f"只下载视频失败: {e.stderr if hasattr(e, 'stderr') and e.stderr else str(e)}")
-                logger.info("尝试下载视频+最低音频...")
-                video_cmd_fallback = self._build_ytdlp_command([
-                    '-f', 'bestvideo[ext=mp4]+worstaudio[ext=m4a]/bestvideo+worstaudio',
-                    '--no-write-subs',
-                    '--no-playlist',
+        if download_video:
+            if existing_video_path:
+                logger.info("⏭️  跳过视频下载，使用本地文件")
+                video_path = existing_video_path
+            else:
+                # 下载视频（最高画质，不下载音频，因为只用于截图）
+                logger.info("正在下载视频（最高画质，无音频，仅用于截图）...")
+                # 只下载视频流（最高画质），不下载音频
+                video_cmd = self._build_ytdlp_command([
+                    # 优先mp4，其次720p+，最后任何最高画质视频
+                    '-f', 'bestvideo[ext=mp4]/bestvideo[height>=720]/bestvideo',
+                    '--no-write-subs',  # 不下载字幕（我们会单独下载）
+                    '--no-playlist',  # 不下载播放列表
                     '-o', video_template,
                     url
                 ])
+
                 try:
-                    subprocess.run(video_cmd_fallback, check=True,
-                                   capture_output=True, text=True)
+                    result = subprocess.run(
+                        video_cmd, check=True, capture_output=True, text=True)
+                    # 等待文件写入完成
                     import time
                     time.sleep(1)
-                except Exception as e2:
-                    logger.error(f"视频下载失败: {e2}")
-                    raise
-
-            # 查找下载的视频文件（优先匹配当前视频标题）
-            video_path = None
-            title_clean = video_title.replace(' ', '_').replace('/', '_')
-
-            # 1. 优先精确匹配：标题+扩展名
-            for ext in ['.mp4', '.mkv', '.webm', '.flv', '.avi']:
-                potential_video = os.path.join(
-                    self.output_dir, f"{video_title}{ext}")
-                if os.path.exists(potential_video) and os.path.getsize(potential_video) > 0:
-                    video_path = potential_video
-                    logger.info(
-                        f"✅ 找到下载的视频文件（精确匹配）: {os.path.basename(video_path)}")
-                    break
-
-            # 2. 如果精确匹配没找到，尝试模糊匹配当前视频标题
-            if not video_path:
-                matching_files = []
-                for f in os.listdir(self.output_dir):
-                    if f.endswith(('.mp4', '.mkv', '.webm', '.flv', '.avi')) and not f.endswith(('.srt', '.vtt')):
-                        f_lower = f.lower()
-                        title_lower = video_title.lower()
-                        title_clean_lower = title_clean.lower()
-                        # 检查文件名是否包含视频标题
-                        if (title_lower in f_lower or title_clean_lower in f_lower or
-                                any(part for part in title_lower.split() if len(part) > 3 and part in f_lower)):
-                            matching_files.append(f)
-
-                if matching_files:
-                    # 选择匹配文件中最大的（通常是刚下载的）
-                    matching_files_with_size = [(f, os.path.getsize(os.path.join(self.output_dir, f)))
-                                                for f in matching_files]
-                    matching_files_with_size.sort(
-                        key=lambda x: x[1], reverse=True)
-                    video_path = os.path.join(
-                        self.output_dir, matching_files_with_size[0][0])
-                    logger.info(
-                        f"✅ 找到下载的视频文件（模糊匹配）: {os.path.basename(video_path)}")
-
-            # 3. 如果还是没找到，尝试找最近修改的文件（可能是刚下载的）
-            if not video_path:
-                video_files = []
-                for f in os.listdir(self.output_dir):
-                    if f.endswith(('.mp4', '.mkv', '.webm', '.flv', '.avi')) and not f.endswith(('.srt', '.vtt')):
-                        video_files.append(f)
-
-                if video_files:
-                    # 按修改时间排序，选择最新的文件
-                    video_files_with_time = []
-                    for f in video_files:
-                        file_path = os.path.join(self.output_dir, f)
-                        mtime = os.path.getmtime(file_path)
-                        video_files_with_time.append(
-                            (f, mtime, os.path.getsize(file_path)))
-
-                    video_files_with_time.sort(
-                        key=lambda x: x[1], reverse=True)  # 按修改时间降序
-                    video_path = os.path.join(
-                        self.output_dir, video_files_with_time[0][0])
+                except subprocess.CalledProcessError as e:
+                    # 如果只下载视频失败，尝试下载视频+最低音频
                     logger.warning(
-                        f"⚠️  无法精确匹配视频标题，使用最近修改的文件: {os.path.basename(video_path)}")
-                    logger.warning(f"   请确认这是正确的视频文件！")
+                        f"只下载视频失败: {e.stderr if hasattr(e, 'stderr') and e.stderr else str(e)}")
+                    logger.info("尝试下载视频+最低音频...")
+                    video_cmd_fallback = self._build_ytdlp_command([
+                        '-f', 'bestvideo[ext=mp4]+worstaudio[ext=m4a]/bestvideo+worstaudio',
+                        '--no-write-subs',
+                        '--no-playlist',
+                        '-o', video_template,
+                        url
+                    ])
+                    try:
+                        subprocess.run(video_cmd_fallback, check=True,
+                                       capture_output=True, text=True)
+                        import time
+                        time.sleep(1)
+                    except Exception as e2:
+                        logger.error(f"视频下载失败: {e2}")
+                        raise
 
-            if not video_path:
-                raise FileNotFoundError(f"未找到下载的视频文件（标题: {video_title}）")
+                # 查找下载的视频文件（优先匹配当前视频标题）
+                video_path = None
+                title_clean = video_title.replace(' ', '_').replace('/', '_')
 
-            file_size = os.path.getsize(video_path) / 1024 / 1024
-            logger.info(
-                f"视频文件: {os.path.basename(video_path)} ({file_size:.2f} MB)")
+                # 1. 优先精确匹配：标题+扩展名
+                for ext in ['.mp4', '.mkv', '.webm', '.flv', '.avi']:
+                    potential_video = os.path.join(
+                        self.output_dir, f"{video_title}{ext}")
+                    if os.path.exists(potential_video) and os.path.getsize(potential_video) > 0:
+                        video_path = potential_video
+                        logger.info(
+                            f"✅ 找到下载的视频文件（精确匹配）: {os.path.basename(video_path)}")
+                        break
+
+                # 2. 如果精确匹配没找到，尝试模糊匹配当前视频标题
+                if not video_path:
+                    matching_files = []
+                    for f in os.listdir(self.output_dir):
+                        if f.endswith(('.mp4', '.mkv', '.webm', '.flv', '.avi')) and not f.endswith(('.srt', '.vtt')):
+                            f_lower = f.lower()
+                            title_lower = video_title.lower()
+                            title_clean_lower = title_clean.lower()
+                            # 检查文件名是否包含视频标题
+                            if (title_lower in f_lower or title_clean_lower in f_lower or
+                                    any(part for part in title_lower.split() if len(part) > 3 and part in f_lower)):
+                                matching_files.append(f)
+
+                    if matching_files:
+                        # 选择匹配文件中最大的（通常是刚下载的）
+                        matching_files_with_size = [(f, os.path.getsize(os.path.join(self.output_dir, f)))
+                                                    for f in matching_files]
+                        matching_files_with_size.sort(
+                            key=lambda x: x[1], reverse=True)
+                        video_path = os.path.join(
+                            self.output_dir, matching_files_with_size[0][0])
+                        logger.info(
+                            f"✅ 找到下载的视频文件（模糊匹配）: {os.path.basename(video_path)}")
+
+                # 3. 如果还是没找到，尝试找最近修改的文件（可能是刚下载的）
+                if not video_path:
+                    video_files = []
+                    for f in os.listdir(self.output_dir):
+                        if f.endswith(('.mp4', '.mkv', '.webm', '.flv', '.avi')) and not f.endswith(('.srt', '.vtt')):
+                            video_files.append(f)
+
+                    if video_files:
+                        # 按修改时间排序，选择最新的文件
+                        video_files_with_time = []
+                        for f in video_files:
+                            file_path = os.path.join(self.output_dir, f)
+                            mtime = os.path.getmtime(file_path)
+                            video_files_with_time.append(
+                                (f, mtime, os.path.getsize(file_path)))
+
+                        video_files_with_time.sort(
+                            key=lambda x: x[1], reverse=True)  # 按修改时间降序
+                        video_path = os.path.join(
+                            self.output_dir, video_files_with_time[0][0])
+                        logger.warning(
+                            f"⚠️  无法精确匹配视频标题，使用最近修改的文件: {os.path.basename(video_path)}")
+                        logger.warning(f"   请确认这是正确的视频文件！")
+
+                if not video_path:
+                    raise FileNotFoundError(f"未找到下载的视频文件（标题: {video_title}）")
+
+                file_size = os.path.getsize(video_path) / 1024 / 1024
+                logger.info(
+                    f"视频文件: {os.path.basename(video_path)} ({file_size:.2f} MB)")
+        else:
+            logger.info("📝 Non video模式：跳过视频下载")
 
         # 如果已有本地字幕，跳过下载
         if existing_subtitle_path:
@@ -759,13 +766,15 @@ class TimeRangeExtractor:
 class VideoSummaryApp:
     """视频总结应用主类"""
 
-    def __init__(self, output_dir: str = "output", test_mode: bool = False, cookies_file: str = None):
+    def __init__(self, output_dir: str = "output", test_mode: bool = False,
+                 text_only: bool = False, cookies_file: str = None):
         """
         初始化应用
 
         Args:
             output_dir: 输出目录
             test_mode: 是否启用测试模式（不调用LLM，仅输出Prompt）
+            text_only: Non video模式，仅生成文本总结
             cookies_file: Cookies 文件路径（用于 Bilibili 等需要登录的网站）
         """
         self.output_dir = output_dir
@@ -774,6 +783,7 @@ class VideoSummaryApp:
             os.path.join(output_dir, "downloads"), cookies_file=cookies_file)
         self.time_extractor = TimeRangeExtractor()
         self.test_mode = test_mode
+        self.text_only = text_only
 
     def process_video(self, url: str,
                       frame_extraction_interval: float = 2.0,
@@ -795,7 +805,8 @@ class VideoSummaryApp:
 
         # 1. 下载视频和字幕
         logger.info("\n[步骤 1/5] 下载视频和字幕...")
-        download_result = self.downloader.download(url)
+        download_result = self.downloader.download(
+            url, download_video=not self.text_only)
         video_path = download_result['video']
         subtitle_path = download_result['subtitle']
         video_title = download_result['title']
@@ -821,7 +832,10 @@ class VideoSummaryApp:
 
         # 3 & 4. AI总结 与 关键帧提取（并行）
         logger.info("\n[步骤 3/5] 生成AI总结...")
-        logger.info("\n[步骤 4/5] 提取关键帧（与步骤 3 并行执行）...")
+        if not self.text_only:
+            logger.info("\n[步骤 4/5] 提取关键帧（与步骤 3 并行执行）...")
+        else:
+            logger.info("\n[步骤 4/5] Non video模式：跳过关键帧提取")
 
         # 检测语言并切分文本（按词/字数量）
         language = detect_language(consolidated_text)
@@ -837,22 +851,27 @@ class VideoSummaryApp:
             word_count = self._count_words(chunk['text'])
             logger.info(f"  - 片段 {idx}/{len(chunks)} 词数: {word_count}")
 
-        frames_dir = os.path.join(
-            self.output_dir, f"{video_title}_frames")
-        os.makedirs(frames_dir, exist_ok=True)
+        chunk_frames: Dict[int, List[str]] = {}
+        if self.text_only:
+            summary_path = self._generate_summary_with_chunks(
+                temp_text_file, chunk_texts, video_title)
+        else:
+            frames_dir = os.path.join(
+                self.output_dir, f"{video_title}_frames")
+            os.makedirs(frames_dir, exist_ok=True)
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            summary_future = executor.submit(
-                self._generate_summary_with_chunks,
-                temp_text_file, chunk_texts, video_title
-            )
-            frames_future = executor.submit(
-                self._extract_frames_for_chunks,
-                video_path, chunks, frames_dir,
-                frame_extraction_interval, skip_similar_frames
-            )
-            summary_path = summary_future.result()
-            chunk_frames = frames_future.result()
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                summary_future = executor.submit(
+                    self._generate_summary_with_chunks,
+                    temp_text_file, chunk_texts, video_title
+                )
+                frames_future = executor.submit(
+                    self._extract_frames_for_chunks,
+                    video_path, chunks, frames_dir,
+                    frame_extraction_interval, skip_similar_frames
+                )
+                summary_path = summary_future.result()
+                chunk_frames = frames_future.result()
 
         # 5. 生成最终markdown
         logger.info("\n[步骤 5/5] 生成最终markdown文档...")
@@ -1079,7 +1098,10 @@ class VideoSummaryApp:
             f.write(f"# {video_title} 视频总结\n\n")
             f.write(
                 f"> 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write(f"> 源视频: {os.path.basename(video_path)}\n\n")
+            if video_path:
+                f.write(f"> 源视频: {os.path.basename(video_path)}\n\n")
+            else:
+                f.write("> 源视频: 未下载（Non video模式）\n\n")
             f.write("---\n\n")
 
             # 解析总结，找到每个部分
@@ -1306,6 +1328,9 @@ def main():
         '-t', '--test', action='store_true',
         help='测试模式：不调用LLM，直接把Prompt写入输出，便于查看上下文')
     parser.add_argument(
+        '-n', '--text-only', action='store_true',
+        help='Non video模式：不下载视频、不提取截图，仅输出文本总结')
+    parser.add_argument(
         '-c', '--cookies', type=str, default=None,
         help='Cookies 文件路径（用于 Bilibili 等需要登录的网站），例如: --cookies cookies.txt')
 
@@ -1321,7 +1346,9 @@ def main():
             logger.info(f"✅ 使用 Cookies 文件: {cookies_file}")
 
         app = VideoSummaryApp(output_dir=args.output,
-                              test_mode=args.test, cookies_file=cookies_file)
+                              test_mode=args.test,
+                              text_only=args.text_only,
+                              cookies_file=cookies_file)
         result_path = app.process_video(
             args.url, frame_extraction_interval=args.interval)
         print(f"\n✅ 完成！结果文件: {result_path}")
