@@ -77,6 +77,11 @@ pip install -r requirements.txt
 
 > 导出完成后，将文件放到项目根目录，并通过 `-c cookies.txt` 传入即可；程序在执行前会校验文件是否存在。
 
+
+### 修改Prompt（可选）
+
+Prompt写在 `video_summary_app.py` 里，变量名为 `BASE_SYSTEM_PROMPT`。里面的Prompt目前是非常定制化针对图形学/游戏引擎的内容，可以按需进行修改。
+
 ---
 
 ## 运行方式
@@ -117,7 +122,7 @@ python video_summary_app.py "https://www.bilibili.com/video/BVxxxx" -c cookies.t
    - 读取 Bilibili AI 字幕（例如 `ai-zh`）通常需要登录。
 
 2. **如何导出？**  
-   - 推荐安装浏览器插件（如 EditThisCookie、Get cookies.txt）。  
+   - 推荐安装浏览器插件（如 Get cookies.txt）。  
    - 登录目标网站后，通过插件导出 Netscape 格式文件。
 
 3. **如何使用？**  
@@ -132,7 +137,7 @@ python video_summary_app.py "https://www.bilibili.com/video/BVxxxx" -c cookies.t
    `VideoDownloader` 通过 `yt-dlp` 先拉取视频信息、字幕列表，优先命中 `ai-zh > zh-CN > zh > ai-en > en`，若本地已有文件会自动复用。
 
 2. **解析与分段**  
-   `srt.py` 解析字幕，`parse_subtitles` 会输出带时间戳的结构体与纯文本稿。`detect_language` 决定切片大小（中文 2k token / 英文 1.7k token）。
+   解析字幕，`parse_subtitles` 会输出带时间戳的结构体与纯文本稿。`detect_language` 决定切片大小（中文 2k token / 英文 1.7k token）。
 
 3. **生成总结 & 抓帧（并行）**  
    - `ThreadPoolExecutor` 开两个任务：  
@@ -175,7 +180,7 @@ output/
 ## 常见问题
 
 1. **没有字幕怎么办？**  
-   目前必须依赖字幕；可先用 Bilibili AI 字幕或第三方工具生成字幕后放到 `downloads/` 并重命名匹配标题。
+   目前必须依赖字幕；可先用 Youtube/Bilibili AI 字幕或第三方工具生成字幕后放到 `downloads/` 并重命名匹配标题。
 
 2. **截图和内容不匹配？**  
    文本到时间段的映射基于字幕时间戳，若字幕与画面不同步可适当增大 `interval`、修改 `TextToTimeMapper` 或手动挑选关键帧。
