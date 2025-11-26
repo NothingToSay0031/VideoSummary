@@ -2,7 +2,7 @@
 
 一个一站式的长视频学习助手：输入 YouTube / Bilibili 等平台的链接，程序会自动完成视频/字幕下载、字幕分段、Gemini 总结、关键帧抓取，并输出带截图的 Markdown 学习笔记。支持自定义输出目录、帧提取参数、测试模式、Cookies 认证等多种配置，方便迁移到本地或自动化流水线。
 
-目前功能仍然非常简陋，且仅我个人使用，未经大量测试，欢迎大家提 Issue / PR 交流想法！
+目前功能仍然非常简陋，目前仅有我个人使用，未经大量测试，欢迎大家交流想法！欢迎Fork，欢迎二次开发。
 
 ---
 
@@ -94,7 +94,7 @@ python video_summary_app.py "https://www.bilibili.com/video/BVxxxx" -c cookies.t
 ## 处理流程
 
 1. **视频与字幕获取**  
-   `VideoDownloader` 通过 `yt-dlp` 先拉取视频信息、字幕列表，优先命中 `ai-zh > zh-CN > zh > ai-en > en`，若本地已有文件会自动复用。
+   `VideoDownloader` 通过 `yt-dlp` 先拉取视频信息、字幕列表，若本地已有文件会自动复用。
 
 2. **解析与分段**  
    解析字幕，`parse_subtitles` 会输出带时间戳的结构体与纯文本稿。`detect_language` 决定切片大小（中文 2k token / 英文 1.7k token 长度约为10min视频量），可按需调整。
@@ -140,7 +140,7 @@ output/
 ## 常见问题
 
 1. **没有字幕怎么办？**  
-   目前必须依赖字幕；可先用 Youtube/Bilibili AI 字幕或第三方工具（如通义听悟，Whisper等）生成字幕后放到 `downloads/` 并重命名匹配标题。
+   目前必须依赖字幕；可先用 Youtube/Bilibili AI 字幕或第三方工具（如通义听悟，Whisper等）生成字幕后使用本地字幕参数指定本地字幕文件路径。
 
 2. **截图和内容不匹配？**  
    文本到时间段的映射基于字幕时间戳，若字幕与画面不同步可适当增大 `interval`、修改 `TextToTimeMapper` 或手动挑选关键帧。
