@@ -666,6 +666,7 @@ class TimeRangeExtractor:
             interval: 提取间隔（秒）
             image_format: 图片格式
             quality: 图片质量
+            skip_similar: 是否启用智能去重（保留相似场景的最后一帧）
 
         Returns:
             提取的图片文件路径列表
@@ -696,10 +697,25 @@ class TimeRangeExtractor:
         frame_count = 0
         extracted_count = 0
         skipped_similar = 0
-        last_frame = None
+
+        def save_frame(pending, timestamp):
+            nonlocal extracted_count
+            if pending is None:
+                return
+            time_str = TimeRangeExtractor.seconds_to_time_str(timestamp)
+            filename = f"frame_{extracted_count:03d}_{time_str.replace(':', '')}.{ext}"
+            filepath = os.path.join(output_dir, filename)
+            if encode_param:
+                cv2.imwrite(filepath, pending, encode_param)
+            else:
+                cv2.imwrite(filepath, pending)
+            extracted_files.append(filepath)
+            extracted_count += 1
 
         # 跳转到开始位置
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        pending_frame = None
+        pending_time = None
 
         while frame_count <= (end_frame - start_frame):
             ret, frame = cap.read()
@@ -714,33 +730,30 @@ class TimeRangeExtractor:
 
             # 按间隔提取
             if frame_count % frame_interval == 0:
-                is_similar = False
-                if skip_similar and last_frame is not None:
-                    similarity = TimeRangeExtractor._calculate_similarity(
-                        last_frame, frame)
-                    if similarity >= similarity_threshold:
-                        is_similar = True
-                        skipped_similar += 1
-
-                if not is_similar:
-                    time_str = TimeRangeExtractor.seconds_to_time_str(
-                        current_time)
-                    filename = f"frame_{extracted_count:03d}_{time_str.replace(':', '')}.{ext}"
-                    filepath = os.path.join(output_dir, filename)
-
-                    if encode_param:
-                        cv2.imwrite(filepath, frame, encode_param)
+                if not skip_similar:
+                    save_frame(frame, current_time)
+                else:
+                    if pending_frame is None:
+                        pending_frame = frame.copy()
+                        pending_time = current_time
                     else:
-                        cv2.imwrite(filepath, frame)
-
-                    extracted_files.append(filepath)
-                    extracted_count += 1
-                    if skip_similar:
-                        last_frame = frame.copy()
+                        similarity = TimeRangeExtractor._calculate_similarity(
+                            pending_frame, frame)
+                        if similarity >= similarity_threshold:
+                            pending_frame = frame.copy()
+                            pending_time = current_time
+                            skipped_similar += 1
+                        else:
+                            save_frame(pending_frame, pending_time)
+                            pending_frame = frame.copy()
+                            pending_time = current_time
 
             frame_count += 1
 
         cap.release()
+
+        if skip_similar and pending_frame is not None:
+            save_frame(pending_frame, pending_time)
 
         if skip_similar and skipped_similar > 0:
             logger.info(f"    跳过相似帧: {skipped_similar}")
