@@ -654,7 +654,15 @@ class TimeRangeExtractor:
                                 output_dir: str, interval: float = 2.0,
                                 image_format: str = 'jpg', quality: int = 95,
                                 skip_similar: bool = True,
-                                similarity_threshold: float = 0.95) -> List[str]:
+                                similarity_threshold: float = 0.95,
+                                # 新增：分块 + 主/辅关键帧 + 去抖动相关参数（保持有默认值，原有调用不受影响）
+                                use_block_diff: bool = True,
+                                primary_change_threshold: float = 0.25,
+                                secondary_change_threshold: float = 0.12,
+                                min_primary_interval: float = 4.0,
+                                min_secondary_interval: float = 2.0,
+                                block_grid_rows: int = 4,
+                                block_grid_cols: int = 4) -> List[str]:
         """
         在指定时间段内提取视频帧
 
@@ -698,12 +706,14 @@ class TimeRangeExtractor:
         extracted_count = 0
         skipped_similar = 0
 
-        def save_frame(pending, timestamp):
+        def save_frame(pending, timestamp, is_primary: bool = True):
             nonlocal extracted_count
             if pending is None:
                 return
             time_str = TimeRangeExtractor.seconds_to_time_str(timestamp)
-            filename = f"frame_{extracted_count:03d}_{time_str.replace(':', '')}.{ext}"
+            # 标记主关键帧 / 辅助帧，方便后续人工查看（对后续流程无破坏性影响）
+            kind = "main" if is_primary else "aux"
+            filename = f"frame_{kind}_{extracted_count:03d}_{time_str.replace(':', '')}.{ext}"
             filepath = os.path.join(output_dir, filename)
             if encode_param:
                 cv2.imwrite(filepath, pending, encode_param)
@@ -714,8 +724,9 @@ class TimeRangeExtractor:
 
         # 跳转到开始位置
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        pending_frame = None
-        pending_time = None
+        # 新逻辑：记录上一次真正保存的帧（用于比较变化），而不是仅仅“最后一帧”
+        last_saved_frame = None
+        last_saved_time: Optional[float] = None
 
         while frame_count <= (end_frame - start_frame):
             ret, frame = cap.read()
@@ -730,33 +741,62 @@ class TimeRangeExtractor:
 
             # 按间隔提取
             if frame_count % frame_interval == 0:
+                # 不做智能去重时，仍按固定间隔直接保存帧
                 if not skip_similar:
-                    save_frame(frame, current_time)
+                    save_frame(frame, current_time, is_primary=True)
                 else:
-                    if pending_frame is None:
-                        pending_frame = frame.copy()
-                        pending_time = current_time
+                    # 分块 + 去抖动 + 主/辅关键帧逻辑
+                    # 1) 第一帧：无论如何先保存为主关键帧，作为基准
+                    if last_saved_frame is None:
+                        save_frame(frame, current_time, is_primary=True)
+                        last_saved_frame = frame.copy()
+                        last_saved_time = current_time
                     else:
-                        similarity = TimeRangeExtractor._calculate_similarity(
-                            pending_frame, frame)
-                        if similarity >= similarity_threshold:
-                            pending_frame = frame.copy()
-                            pending_time = current_time
-                            skipped_similar += 1
+                        # 计算变化程度：默认采用分块灰度平均差
+                        if use_block_diff:
+                            change_score = TimeRangeExtractor._block_change_score(
+                                last_saved_frame, frame,
+                                grid_rows=block_grid_rows,
+                                grid_cols=block_grid_cols
+                            )
+                            # change_score 范围近似在 [0,1]，越大变化越明显
                         else:
-                            save_frame(pending_frame, pending_time)
-                            pending_frame = frame.copy()
-                            pending_time = current_time
+                            # 退化为旧的全局相似度，再转成“变化分数”
+                            similarity = TimeRangeExtractor._calculate_similarity(
+                                last_saved_frame, frame)
+                            change_score = 1.0 - similarity
+
+                        # 与上一次关键帧的时间间隔，作为“去抖动”的最小间隔
+                        time_since_last = (current_time - last_saved_time) if last_saved_time is not None else float(
+                            "inf")
+
+                        is_primary = False
+                        should_save = False
+
+                        # 主关键帧：变化较大，且距离上一次关键帧间隔够长
+                        if change_score >= primary_change_threshold and time_since_last >= min_primary_interval:
+                            is_primary = True
+                            should_save = True
+                        # 辅助关键帧：变化中等，但也需要一定时间间隔，避免同一内容密集截图
+                        elif change_score >= secondary_change_threshold and time_since_last >= min_secondary_interval:
+                            is_primary = False
+                            should_save = True
+                        else:
+                            # 变化太小或时间间隔太短，都认为是抖动/细节变化，跳过
+                            skipped_similar += 1
+
+                        if should_save:
+                            save_frame(frame, current_time,
+                                       is_primary=is_primary)
+                            last_saved_frame = frame.copy()
+                            last_saved_time = current_time
 
             frame_count += 1
 
         cap.release()
 
-        if skip_similar and pending_frame is not None:
-            save_frame(pending_frame, pending_time)
-
         if skip_similar and skipped_similar > 0:
-            logger.info(f"    跳过相似帧: {skipped_similar}")
+            logger.info(f"    跳过相似/抖动帧: {skipped_similar}")
 
         return extracted_files
 
@@ -776,6 +816,51 @@ class TimeRangeExtractor:
         similarity = 1.0 - (mse / max_mse)
         return similarity
 
+    @staticmethod
+    def _block_change_score(frame1, frame2, grid_rows: int = 4, grid_cols: int = 4) -> float:
+        # 1. 预处理
+        gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+
+        # 统一缩放到较小尺寸 (确保能被 grid 整除，方便 reshape)
+        target_w = 256
+        target_h = 144
+
+        # 简单的防御性检查，防止 grid 设置过大
+        if target_h % grid_rows != 0 or target_w % grid_cols != 0:
+            # 为了向量化性能，强行 resize 到能整除的大小
+            target_h = (target_h // grid_rows) * grid_rows
+            target_w = (target_w // grid_cols) * grid_cols
+
+        gray1 = cv2.resize(gray1, (target_w, target_h)).astype(np.float32)
+        gray2 = cv2.resize(gray2, (target_w, target_h)).astype(np.float32)
+
+        # 2. 计算绝对差值图 (Global Difference Map)
+        diff = np.abs(gray1 - gray2) / 255.0
+
+        # 3. 向量化分块 (Magic happens here)
+        # 将 (H, W) 重塑为 (GridRows, BlockH, GridCols, BlockW)
+        # 然后交换轴变为 (GridRows, GridCols, BlockH, BlockW)
+        block_h = target_h // grid_rows
+        block_w = target_w // grid_cols
+
+        reshaped = diff.reshape(grid_rows, block_h, grid_cols, block_w)
+        # 交换轴，把块内的像素维度放在最后
+        reshaped = reshaped.transpose(0, 2, 1, 3)
+
+        # 4. 计算每个块的均值
+        # axis=(2, 3) 意味着对每个块内部的所有像素求平均
+        block_scores = reshaped.mean(axis=(2, 3))
+
+        # block_scores 现在是一个 shape 为 (rows, cols) 的矩阵
+
+        # 5. 决策策略：
+        # 策略 A: 仍然返回全局平均 (和你之前的逻辑一样，但快很多)
+        # return float(np.mean(block_scores))
+
+        # 策略 B (推荐): 返回最大的局部变化。
+        # 这样即使只有画面一角变了，分数也会很高。
+        return float(np.max(block_scores))
 
 class VideoSummaryApp:
     """视频总结应用主类"""
@@ -1101,7 +1186,6 @@ class VideoSummaryApp:
         summary_path = os.path.join(
             self.output_dir, f"{video_title}_summary_temp.md")
         with open(summary_path, 'w', encoding='utf-8') as f:
-            f.write(f"# {video_title} 学习笔记\n\n")
             f.write(f"> 由 AI 生成，共 {len(chunks)} 部分\n\n")
 
             for i, summary in enumerate(summaries):
