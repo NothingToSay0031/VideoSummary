@@ -11,6 +11,7 @@ import re
 import subprocess
 import json
 import logging
+import time
 from datetime import datetime
 from bisect import bisect_left
 from urllib.parse import quote
@@ -1005,7 +1006,7 @@ class VideoSummaryApp:
 
         # 检测语言并切分文本（按词/字数量）
         language = detect_language(consolidated_text)
-        CHUNK_SIZE = 1000 if language == "Chinese" else 850
+        CHUNK_SIZE = 1000 if language == "Chinese" else 500
         OVERLAP = 60 if language == "Chinese" else 50
 
         chunks = self._split_subtitles_into_chunks(
@@ -1169,18 +1170,29 @@ class VideoSummaryApp:
                 current_idx = i + 1
 
                 logger.info(f"  总结片段 {current_idx}/{total_chunks}...")
-                try:
-                    summary = generate_chunk_summary(
-                        client, chunk, current_idx, total_chunks, PRIMARY_MODEL
-                    )
-                    if summary:
-                        summaries.append(summary)
-                    else:
-                        summaries.append(f"\n> [错误: 第 {current_idx} 部分总结为空]\n")
-                except Exception as e:
-                    logger.warning(f"  片段 {current_idx} 总结失败: {e}")
-                    summaries.append(
-                        f"\n> [错误: 第 {current_idx} 部分总结失败: {str(e)}]\n")
+
+                max_retries = 5
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        summary = generate_chunk_summary(
+                            client, chunk, current_idx, total_chunks, PRIMARY_MODEL
+                        )
+                        if summary and summary.strip():
+                            summaries.append(summary)
+                            break
+                        else:
+                            raise RuntimeError("LLM 返回空总结")
+                    except Exception as e:
+                        if attempt < max_retries:
+                            logger.warning(
+                                f"  片段 {current_idx} 第 {attempt}/{max_retries} 次总结失败，将在 30 秒后重试: {e}")
+                            time.sleep(30)
+                        else:
+                            logger.error(
+                                f"  片段 {current_idx} 连续 {max_retries} 次总结失败，终止当前文件处理: {e}")
+                            # 直接抛出异常，中止当前文件的后续处理
+                            raise RuntimeError(
+                                f"片段 {current_idx} 总结在重试 {max_retries} 次后仍失败，终止本文件处理") from e
 
         # 保存总结到文件
         summary_path = os.path.join(
