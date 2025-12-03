@@ -1171,8 +1171,19 @@ class VideoSummaryApp:
 
         # 5. 生成最终markdown
         logger.info("\n[步骤 5/5] 生成最终markdown文档...")
+        # 获取原始文件名（用于输出文件名和标题）
+        original_filename = None
+        if video_path:
+            original_filename = os.path.splitext(
+                os.path.basename(video_path))[0]
+        elif subtitle_path:
+            original_filename = os.path.splitext(
+                os.path.basename(subtitle_path))[0]
+        else:
+            original_filename = video_title
+
         final_md_path = self._generate_final_markdown(
-            summary_path, chunk_texts, chunk_frames, video_title, video_path
+            summary_path, chunk_texts, chunk_frames, video_title, video_path, original_filename
         )
 
         # 清理中间产物
@@ -1388,43 +1399,37 @@ class VideoSummaryApp:
 
     def _generate_final_markdown(self, summary_path: str, chunks: List[str],
                                  chunk_frames: Dict[int, List[str]],
-                                 video_title: str, video_path: str) -> str:
+                                 video_title: str, video_path: str, original_filename: str) -> str:
         """
         生成最终的markdown文档，包含总结和截图
+        
+        Args:
+            summary_path: 总结临时文件路径
+            chunks: 片段文本列表
+            chunk_frames: 片段索引到帧路径列表的映射
+            video_title: 处理后的视频标题（用于内部标识）
+            video_path: 视频文件路径（可能为None）
+            original_filename: 原始文件名（用于输出文件名和一级标题）
         """
         # 读取总结内容
         with open(summary_path, 'r', encoding='utf-8') as f:
             summary_content = f.read()
 
+        # 使用原始文件名作为输出文件名
         final_md_path = os.path.join(
-            self.output_dir, f"{video_title}_最终总结.md")
+            self.output_dir, f"{original_filename}.md")
 
         with open(final_md_path, 'w', encoding='utf-8') as f:
-            # 写入文件头
-            f.write(f"# {video_title} 视频总结\n\n")
-            f.write(
-                f"> 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            if video_path:
-                f.write(f"> 源视频: {os.path.basename(video_path)}\n\n")
-            else:
-                f.write("> 源视频: 未下载（Non video模式）\n\n")
-            f.write("---\n\n")
+            # 写入一级标题（原始文件名）
+            f.write(f"# {original_filename}\n\n")
 
             # 解析总结，找到每个部分
             # 使用更灵活的方式分割内容
             parts = re.split(r'\n## 第 (\d+) 部分\n', summary_content)
 
             # 如果分割成功，parts应该是: [标题和开头内容, '1', 第一部分内容, '2', 第二部分内容, ...]
+            # parts[0] 包含 "> 由 AI 生成，共 X 部分\n\n"，我们直接跳过它
             if len(parts) > 1:
-                # 写入开头内容（如果有）
-                if parts[0].strip():
-                    # 跳过文件头（# 标题 和 > 注释）
-                    header_end = parts[0].find('\n---\n')
-                    if header_end > 0:
-                        parts[0] = parts[0][header_end + 5:]
-                    if parts[0].strip():
-                        f.write(parts[0].strip())
-                        f.write("\n\n---\n\n")
 
                 # 处理每个部分
                 for i in range(1, len(parts), 2):
