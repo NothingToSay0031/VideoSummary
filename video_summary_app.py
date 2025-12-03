@@ -91,6 +91,132 @@ SubtitleEntry = Dict[str, str]
 SubtitleData = List[SubtitleEntry]
 
 
+# ==== 字幕去重逻辑====
+def is_timecode(line: str) -> bool:
+    """判断一行是否是时间轴"""
+    return "-->" in line and line[0].isdigit()
+
+
+def parse_srt_robust(file_path: str) -> List[Dict[str, Any]]:
+    """
+    稳健的 SRT 解析器：不依赖空行，而是根据时间轴特征来切分。
+    解决 '序号和时间轴被当成文本' 的 Bug。
+    """
+    with open(file_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    blocks = []
+    current_block = {"seq": None, "time": None, "text_lines": []}
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # 核心逻辑：扫描到时间轴，说明抓到了一个新块的"骨架"
+        if is_timecode(line):
+            # 1. 保存上一个块（如果存在）
+            if current_block["time"]:
+                blocks.append(current_block)
+
+            # 2. 开始新块
+            # 时间轴的前一行通常是序号，尝试获取
+            seq = "0"
+            if i > 0 and lines[i-1].strip().isdigit():
+                seq = lines[i-1].strip()
+
+            current_block = {
+                "seq": seq,
+                "time": line,
+                "text_lines": []  # 准备接收接下来的文本
+            }
+
+        # 如果不是时间轴，也不是时间轴前面的那个序号，那就是文本内容
+        elif line and not line.isdigit():
+            # 防止把下一行的序号误读为文本：
+            # 只有当下一行不是时间轴时，当前行才可能是文本
+            is_next_line_time = (
+                i + 1 < len(lines) and is_timecode(lines[i+1].strip()))
+            if not is_next_line_time:
+                if current_block["time"]:  # 确保已经在一个块里了
+                    current_block["text_lines"].append(line)
+
+        i += 1
+
+    # 别忘了保存最后一个块
+    if current_block["time"]:
+        blocks.append(current_block)
+
+    return blocks
+
+
+def get_longest_overlap(s1: str, s2: str) -> int:
+    """计算重叠长度逻辑"""
+    if not s1 or not s2:
+        return 0
+    min_overlap = 4
+    max_possible = min(len(s1), len(s2))
+    for length in range(max_possible, min_overlap - 1, -1):
+        if s1.endswith(s2[:length]):
+            return length
+    return 0
+
+
+def remove_duplicates_from_srt(file_path: str) -> bool:
+    """
+    去除 SRT 字幕文件中的重复内容
+    
+    Args:
+        file_path: 字幕文件路径
+        
+    Returns:
+        是否成功处理（True）或失败（False）
+    """
+    try:
+        logger.info(f"🧹 开始对字幕进行去重处理: {os.path.basename(file_path)}")
+        blocks = parse_srt_robust(file_path)
+
+        if not blocks:
+            logger.warning("  -> 空文件或解析失败，跳过去重")
+            return False
+
+        final_blocks = []
+        prev_text = ""
+
+        for block in blocks:
+            # 将多行文本合并为一行，去空格
+            current_text_raw = " ".join(block["text_lines"]).strip()
+
+            # 去重逻辑
+            if not final_blocks:
+                final_blocks.append((block["time"], current_text_raw))
+                prev_text = current_text_raw
+                continue
+
+            overlap_len = get_longest_overlap(prev_text, current_text_raw)
+
+            if overlap_len > 0:
+                new_text = current_text_raw[overlap_len:].strip()
+            else:
+                new_text = current_text_raw
+
+            # 过滤掉空的或者只有标点的行
+            if new_text and len(new_text) > 1:
+                final_blocks.append((block["time"], new_text))
+                prev_text = new_text
+
+        # 写入原文件（覆盖）
+        with open(file_path, 'w', encoding='utf-8') as f:
+            for index, (time, text) in enumerate(final_blocks, 1):
+                f.write(f"{index}\n{time}\n{text}\n\n")
+
+        logger.info(
+            f"  ✅ 去重完成! 原始行数: {len(blocks)} -> 清洗后: {len(final_blocks)}")
+        return True
+    except Exception as e:
+        logger.error(f"  ❌ 字幕去重失败: {e}")
+        return False
+
+
 def parse_subtitles(file_content: str) -> Tuple[SubtitleData, str]:
     """
     解析 SRT 字幕，返回结构化字幕列表与整合文本
@@ -546,6 +672,9 @@ class VideoDownloader:
                 if subtitle_path:
                     logger.info(
                         f"选择字幕文件: {os.path.basename(subtitle_path)}")
+                    # 对下载的字幕进行去重处理
+                    if subtitle_path.endswith('.srt'):
+                        remove_duplicates_from_srt(subtitle_path)
 
         return {
             'video': video_path,
