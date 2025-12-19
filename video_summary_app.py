@@ -672,9 +672,9 @@ class VideoDownloader:
                 if subtitle_path:
                     logger.info(
                         f"选择字幕文件: {os.path.basename(subtitle_path)}")
-                    # 对下载的字幕进行去重处理
-                    if subtitle_path.endswith('.srt'):
-                        remove_duplicates_from_srt(subtitle_path)
+        # 对字幕进行去重处理
+        if subtitle_path.endswith('.srt'):
+            remove_duplicates_from_srt(subtitle_path)
 
         return {
             'video': video_path,

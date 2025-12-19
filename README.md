@@ -94,6 +94,9 @@ python video_summary_app.py "https://www.bilibili.com/video/BVxxxx" -o bili_outp
 
 # 传入 Cookies 并启用测试模式
 python video_summary_app.py "https://www.bilibili.com/video/BVxxxx" -c cookies.txt -t
+
+# 仅生成文字总结，跳过视频与帧处理
+python video_summary_app.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ" -n -c "D:\Downloads\ytb_cookie.txt"
 ```
 ---
 
