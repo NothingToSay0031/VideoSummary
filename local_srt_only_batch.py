@@ -25,24 +25,24 @@ if CURRENT_DIR not in sys.path:
 
 
 def find_srt_files(input_dir: str) -> List[str]:
-    """递归查找目录下所有 .srt 文件"""
-    srt_files: List[str] = []
+    """递归查找目录下所有 .srt 和 .txt 文件"""
+    subtitle_files: List[str] = []
     for root, _dirs, files in os.walk(input_dir):
         for name in files:
-            if name.lower().endswith(".srt"):
-                srt_files.append(os.path.join(root, name))
-    return sorted(srt_files)
+            if name.lower().endswith((".srt", ".txt")):
+                subtitle_files.append(os.path.join(root, name))
+    return sorted(subtitle_files)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="批量处理本地 SRT 字幕文件（仅生成文本总结，不截图）",
+        description="批量处理本地 SRT/TXT 字幕文件（仅生成文本总结，不截图）",
     )
     parser.add_argument(
         "-i",
         "--input-dir",
         default="input",
-        help="SRT 所在输入目录（默认: input）",
+        help="SRT/TXT 所在输入目录（默认: input）",
     )
     parser.add_argument(
         "-o",
@@ -66,12 +66,12 @@ def main() -> None:
         print(f"输入目录不存在: {input_dir}")
         sys.exit(1)
 
-    srt_files = find_srt_files(input_dir)
-    if not srt_files:
-        print(f"在目录中未找到 .srt 文件: {input_dir}")
+    subtitle_files = find_srt_files(input_dir)
+    if not subtitle_files:
+        print(f"在目录中未找到 .srt 或 .txt 文件: {input_dir}")
         sys.exit(0)
 
-    print(f"发现 {len(srt_files)} 个 SRT 文件，将逐个生成总结（仅文本，无截图）")
+    print(f"发现 {len(subtitle_files)} 个字幕文件（SRT/TXT），将逐个生成总结（仅文本，无截图）")
 
     app = VideoSummaryApp(
         output_dir=output_dir,
@@ -83,17 +83,17 @@ def main() -> None:
     success = 0
     failed = 0
 
-    for idx, srt_path in enumerate(srt_files, start=1):
-        rel_path = os.path.relpath(srt_path, input_dir)
-        base_name = os.path.splitext(os.path.basename(srt_path))[0]
+    for idx, subtitle_path in enumerate(subtitle_files, start=1):
+        rel_path = os.path.relpath(subtitle_path, input_dir)
+        base_name = os.path.splitext(os.path.basename(subtitle_path))[0]
         title = sanitize_filename(base_name)
 
-        print(f"\n[{idx}/{len(srt_files)}] 处理字幕: {rel_path}")
+        print(f"\n[{idx}/{len(subtitle_files)}] 处理字幕: {rel_path}")
         try:
             result_md = app.process_video(
                 url=None,
                 local_video=None,
-                local_subtitle=srt_path,
+                local_subtitle=subtitle_path,
                 provided_title=title,
             )
             if result_md:

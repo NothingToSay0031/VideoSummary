@@ -217,9 +217,15 @@ def remove_duplicates_from_srt(file_path: str) -> bool:
         return False
 
 
-def parse_subtitles(file_content: str) -> Tuple[SubtitleData, str]:
+def parse_subtitles(file_content: str, file_path: Optional[str] = None) -> Tuple[SubtitleData, str]:
     """
-    解析 SRT 字幕，返回结构化字幕列表与整合文本
+    解析字幕文件，返回：
+    - 带时间轴的结构化字幕列表（SRT / VTT 等）
+    - 整合后的纯文本
+
+    对于纯文本文件（无时间戳的 .txt）：
+    - 不再构造任何“虚拟时间戳”
+    - 仅返回整体文本，后续直接按 token 数切分
     """
     if file_content.startswith('\ufeff'):
         file_content = file_content.lstrip('\ufeff')
@@ -227,11 +233,20 @@ def parse_subtitles(file_content: str) -> Tuple[SubtitleData, str]:
         file_content = re.sub(r'WEBVTT.*?\n\n', '',
                               file_content, flags=re.DOTALL)
 
+    # 检测是否为带时间轴的字幕
+    timestamp_pattern = re.compile(
+        r'(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})')
+    has_timestamps = bool(timestamp_pattern.search(file_content))
+
+    # 纯文本：没有任何时间轴（通常是 .txt）
+    if not has_timestamps and file_path and file_path.lower().endswith('.txt'):
+        logger.info("📄 检测到纯文本 TXT（无时间戳），后续直接按 token 切分")
+        return [], file_content.strip()
+
+    # 其它情况：按 SRT 逻辑解析（包括带时间轴的 .txt/.srt/.vtt 等）
     blocks = file_content.strip().split('\n\n')
     subtitle_data: SubtitleData = []
     consolidated_lines: List[str] = []
-    timestamp_pattern = re.compile(
-        r'(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})')
 
     for block in blocks:
         lines = block.strip().split('\n')
@@ -1116,7 +1131,8 @@ class VideoSummaryApp:
         with open(subtitle_path, 'r', encoding='utf-8') as f:
             subtitle_content = f.read()
 
-        subtitle_data, consolidated_text = parse_subtitles(subtitle_content)
+        subtitle_data, consolidated_text = parse_subtitles(
+            subtitle_content, subtitle_path)
         logger.info(f"解析完成: 共 {len(subtitle_data)} 条字幕")
 
         # 保存文稿到临时文件
@@ -1138,8 +1154,15 @@ class VideoSummaryApp:
         CHUNK_SIZE = 1000 if language == "Chinese" else 500
         OVERLAP = 60 if language == "Chinese" else 50
 
-        chunks = self._split_subtitles_into_chunks(
-            subtitle_data, CHUNK_SIZE, OVERLAP)
+        # 有时间轴：按字幕条目（带时间）切分；纯文本：直接按 token 切分
+        if subtitle_data:
+            chunks = self._split_subtitles_into_chunks(
+                subtitle_data, CHUNK_SIZE, OVERLAP)
+        else:
+            logger.info("⏱ 当前字幕无时间轴，将按纯文本方式仅按 token 切分（不支持提帧）")
+            chunks = self._split_plain_text_into_chunks(
+                consolidated_text, CHUNK_SIZE, OVERLAP)
+
         chunk_texts = [chunk['text'] for chunk in chunks]
 
         logger.info(f"文本已切分为 {len(chunks)} 个片段")
@@ -1148,7 +1171,8 @@ class VideoSummaryApp:
             logger.info(f"  - 片段 {idx}/{len(chunks)} 词数: {word_count}")
 
         chunk_frames: Dict[int, List[str]] = {}
-        if self.text_only:
+        # 纯文本 / text-only：只做总结，不提帧
+        if self.text_only or not subtitle_data:
             summary_path = self._generate_summary_with_chunks(
                 temp_text_file, chunk_texts, video_title)
         else:
@@ -1214,7 +1238,10 @@ class VideoSummaryApp:
     def _split_subtitles_into_chunks(self, subtitle_data: SubtitleData,
                                      chunk_size: int, overlap: int) -> List[Dict[str, Any]]:
         """
-        基于字幕数据按词数切分，并返回每段的文本和时间范围
+        基于【带时间轴】的字幕数据按词数切分，并返回每段的文本和时间范围。
+
+        仅用于 SRT/VTT 等有时间戳的场景；
+        纯文本 TXT 会走单独的 `_split_plain_text_into_chunks`。
         """
         if not subtitle_data:
             return []
@@ -1270,6 +1297,61 @@ class VideoSummaryApp:
             # 确保至少向前推进
             if start_idx == end_idx:
                 start_idx += 1
+
+        return chunks
+
+    def _split_plain_text_into_chunks(self, text: str,
+                                      chunk_size: int,
+                                      overlap: int) -> List[Dict[str, Any]]:
+        """
+        纯文本模式：在文本内部按 token 数量切分，并加入一定重叠。
+
+        不依赖时间戳，只返回带 `text` 字段的 chunk，
+        适用于 TXT 转录稿、只做文字总结的场景。
+        """
+        token_pattern = re.compile(r'[\u4e00-\u9fff]|[a-zA-Z0-9]+')
+        tokens = token_pattern.findall(text)
+        total_tokens = len(tokens)
+        if total_tokens == 0:
+            return []
+
+        # 记录每个 token 在原文中的起止位置，便于精确切分
+        token_positions: List[Tuple[int, int]] = []
+        for m in token_pattern.finditer(text):
+            token_positions.append((m.start(), m.end()))
+
+        chunks: List[Dict[str, Any]] = []
+        start_token_idx = 0
+
+        while start_token_idx < total_tokens:
+            end_token_idx = min(start_token_idx + chunk_size, total_tokens)
+
+            if start_token_idx < len(token_positions):
+                text_start = token_positions[start_token_idx][0]
+            else:
+                text_start = len(text)
+
+            if end_token_idx - 1 < len(token_positions):
+                text_end = token_positions[end_token_idx - 1][1]
+            else:
+                text_end = len(text)
+
+            chunk_text = text[text_start:text_end].strip()
+            if chunk_text:
+                chunks.append({
+                    'text': chunk_text,
+                    'start_index': start_token_idx,
+                    'end_index': end_token_idx,
+                })
+
+            if end_token_idx >= total_tokens:
+                break
+
+            # 计算下一个 chunk 的起始 token（带少量重叠）
+            next_start = max(0, end_token_idx - overlap)
+            if next_start <= start_token_idx:
+                next_start = end_token_idx
+            start_token_idx = next_start
 
         return chunks
 
@@ -1647,7 +1729,7 @@ def main():
         help='本地视频文件路径（配合本地字幕或仅提取帧）')
     parser.add_argument(
         '--local-subtitle', type=str, default=None,
-        help='本地字幕文件路径（SRT）；text-only 模式下只需该参数')
+        help='本地字幕文件路径（SRT/TXT）；text-only 模式下只需该参数；TXT格式为纯文本，无时间戳')
     parser.add_argument(
         '--title', type=str, default=None,
         help='手动指定输出标题（可选）')
